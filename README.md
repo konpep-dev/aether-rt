@@ -102,6 +102,13 @@ dotnet publish -c Release --runtime win-x64 --self-contained true -p:PublishSing
 
 ---
 
+### 🛡️ Future Updates
+**I would suggest adding antiVM and better anti-AV features. I will bring these in the future as updates.**
+
+<br />
+
+---
+
 ### ⚠️ Disclaimer
 **Educational Purposes Only**
 This software is provided strictly for educational purposes and unauthorized testing is prohibited. The author assumes no liability for any misuse or damage.
