@@ -31,20 +31,23 @@ To evade analysis by automated sandboxes and security researchers:
 
 ---
 
-## 3. Stealth UAC Bypass (Privilege Escalation)
-The `/uacbypass` method has been upgraded for maximum stealth and "FUD" (Fully Undetectable) status:
+## 3. Stealth UAC Bypass 2.0 (SilentCleanup)
+The `/uacbypass` method has been upgraded to version 2.0 to evade advanced behavioral detections (like `UACBypassExp`) recently implemented in modern security stacks:
 
-*   **Internal Execution:** The bypass logic has been moved from the Controller to the Executor. No suspicious PowerShell commands are sent over the network or logged in the system.
-*   **ComputerDefaults Engine:** Instead of the commonly tracked `fodhelper.exe`, we utilize `computerdefaults.exe`, which is less targeted by modern scanners.
-*   **Registry Obfuscation:** All sensitive registry keys (like `ms-settings\Shell\Open\command`) are XOR-encrypted in the source code.
-*   **Direct Registry API:** Uses native .NET Registry APIs instead of shell commands, making the activity invisible to most behavior-based blockers.
-*   **Rapid Cleanup:** Registry keys are automatically purged 3 seconds after execution, leaving the system clean.
+*   **Zero Registry Classes:** We no longer touch highly monitored keys like `ms-settings` or `fodhelper`.
+*   **Environment Hijacking:** Version 2.0 exploits the Windows "SilentCleanup" scheduled task. It performs a hijack of the `%windir%` environment variable in the User hive (`HKCU\Environment`).
+*   **Task Orchestration:** The Executor creates a temporary mock Windows directory, places a copy of itself named `cleanmgr.exe` inside, and triggers the task via `schtasks`.
+*   **Privileged Execution:** Because the SilentCleanup task is configured to run with `Highest Privileges`, it executes our payload with administrative rights automatically, bypassing any UAC prompts.
+*   **Total Cleanup:** Immediately after execution, the `%windir%` variable is restored to its original value, and all temporary files are purged.
 
 ---
 
 ## 4. Anti-AV & Evasion (Windows Defender Bypass)
 These methods target runtime detection by modern antivirus solutions:
 
+*   **UnDefend v2 (Database Locking):** Uses `ntdll.dll!NtOpenFile` to open primary Windows Defender database files (`mpasbase.vdm`, `mpasdlta.vdm`) with `0` share access. This prevents `MsMpEng.exe` from reading signatures, rendering the engine blind.
+*   **Token Hijacking (GetSystem):** Achieves `SYSTEM` privileges by enabling `SeDebugPrivilege` and stealing a process token from `winlogon.exe`, avoiding noisy service creation.
+*   **Binary Self-Locking:** The program opens its own executable file for reading without `FILE_SHARE_DELETE`, creating a kernel-level lock that prevents AV from moving or deleting the active binary.
 *   **XOR String Obfuscation:** All sensitive identifiers (URLs, Token IDs, Registry paths, File names) are stored as XOR-encrypted byte arrays and only decrypted in memory during runtime.
 *   **AMSI Runtime Patching (Memory):** Patches the `AmsiScanBuffer` function in `amsi.dll` in-memory. This "blinds" Windows Defender, preventing it from scanning scripts executed within the process.
 *   **ETW Disabling:** Event Tracing for Windows (ETW) sends telemetry regarding system calls. By patching `EtwEventWrite` in `ntdll.dll`, we stop the flow of metadata to Windows Security logs.
