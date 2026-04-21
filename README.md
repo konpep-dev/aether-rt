@@ -170,6 +170,50 @@ Controller (Attacker)
 
 ---
 
+### 📁 File System Management
+
+**Technical Overview (based on implementation)**
+
+The file manager is implemented as a command/response protocol between Controller and Executor, using a dedicated WebSocket session to the relay server.
+
+**Activation flow**
+- The operator runs `/filesys` in Controller.
+- Controller sends a trigger to Executor.
+- Executor opens a `ClientWebSocket` to `RELAY_SERVER` and registers as:
+  - `{"id":"<machineId>","role":"target"}`
+- Controller then opens the File Manager UI and starts a separate WebSocket session as the controller role.
+
+**Protocol commands**
+- `LIST_DRIVES` -> returns JSON: `{"cmd":"DRIVES","drives":[...]}`
+- `LIST_DIR` -> returns JSON: `{"cmd":"DIR","items":[...]}`
+- `DOWNLOAD` -> streams `FILE_CHUNK` messages (`chunk`, `total`, base64 `data`)
+- `DELETE` -> deletes file/folder and returns `{"status":"OK"}`
+- `RENAME` -> uses `oldPath|newPath` and returns `{"status":"OK"}`
+
+**Directory listing format**
+- Directories and files are returned in one list with metadata:
+  - `name`
+  - `type` (`DIR` or `FILE`)
+  - `size` (human-readable for files)
+  - `modified` (format: `yyyy-MM-dd HH:mm`)
+
+**Transfer behavior**
+- Download is chunked in 50 KB parts (`chunkSize = 50000`) and encoded in Base64.
+- Controller reconstructs content from received chunks and saves via Save dialog.
+
+**Current implementation note**
+- The Controller UI includes an Upload button and sends `UPLOAD`.
+- In the current Executor command switch, `UPLOAD` handling is not implemented yet.
+- So browsing, listing, download, delete, and rename are implemented; upload appears incomplete in this version.
+
+<div align="center">
+<img src="Imge2.png" alt="File System Manager" width="80%">
+</div>
+
+<br />
+
+---
+
 ### ⚠️ Disclaimer
 **Educational Purposes Only**
 This software is provided strictly for educational purposes and unauthorized testing is prohibited. The author assumes no liability for any misuse or damage.
