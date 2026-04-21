@@ -207,7 +207,7 @@ The file manager is implemented as a command/response protocol between Controlle
 - So browsing, listing, download, delete, and rename are implemented; upload appears incomplete in this version.
 
 <div align="center">
-<img src="Imge2.png" alt="File System Manager" width="80%">
+<img src="image2.png" alt="File System Manager" width="80%">
 </div>
 
 <br />
